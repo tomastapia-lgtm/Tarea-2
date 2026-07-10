@@ -1,0 +1,473 @@
+import tkinter as tk
+from tkinter import ttk
+import numpy as np
+import os
+from pyniryo import *
+
+# --- 1. CONEXIÓN E INICIALIZACIÓN DEL ROBOT REAL ---
+ROBOT_IP = "10.10.10.10"
+FILENAME = "cmd_joints.txt"
+
+# Pose por defecto para inicializar la interfaz SOLO si el robot real está apagado o desconectado
+FALLBACK_POSE_DEG = [0, 29, -72, 0, 0, 0]
+
+try:
+    print(f"Conectando al Niryo Ned2 en {ROBOT_IP}...")
+    robot = NiryoRobot(ROBOT_IP)
+    robot.calibrate_auto()
+    
+    # --- NUEVO: Configurar la velocidad física del brazo al 100% ---
+    robot.set_arm_max_velocity(100) 
+    
+    robot.update_tool()
+    robot.release_with_tool()
+    robot_connected = True
+    print("¡Robot real conectado y calibrado exitosamente!")
+except Exception as e:
+    print(f"Advertencia: No se pudo conectar al robot real ({e}). Ejecutando en modo SOLO SIMULACIÓN.")
+    robot_connected = False
+
+# --- 2. CONFIGURACIÓN DE LÍMITES DE ARTICULACIONES EN GRADOS ---
+JOINT_RANGES = [
+    (-90, 90),    # J1
+    (-50, 30),    # J2
+    (-50, 120),   # J3
+    (-90, 90),    # J4
+    (-80, 80),    # J5
+    (-90, 90)     # J6
+]
+
+initial_pose_deg = list(FALLBACK_POSE_DEG)
+
+if robot_connected:
+    try:
+        joints_rad = robot.get_joints()
+        initial_pose_deg = [int(np.degrees(j)) for j in joints_rad]
+        print(f"Sincronizando interfaz con la pose real del hardware: {initial_pose_deg}")
+    except Exception as e:
+        print(f"No se pudo leer la pose inicial del robot, usando valores por defecto: {e}")
+
+# --- 3. SECUENCIA DE PICK AND PLACE (Pinza: Abierta = 0.000 / Cerrada = 0.020) ---
+# Formato: [J1, J2, J3, J4, J5, J6, Pinza]
+SECUENCIA = [
+   {"desc": "1. Inicio / Posición Inicial", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   
+    # --- Primer cubo ---
+   {"desc": "2. Primer cubo", "pose": [-90, 0, -25, 0, 0, 0, 0.000]},
+   {"desc": "3. Acercarse al primer cubo", "pose": [-90, -37, -25, 0, -27, 0, 0.000]},
+   {"desc": "4. Cerrar la pinza sobre el primer cubo", "pose": [-90, -37, -25, 0, -27, 0, 0.020]},
+   {"desc": "5. Levantar el primer cubo", "pose": [-90, 0 , -25, 0, 0, 0, 0.020]},
+
+    # --- Posición central (1) ---
+   {"desc": "6. Pre-acomodación de la Posición central (1)", "pose": [0, 0, 0, 0, 0, 0, 0.020]},
+   {"desc": "7. Mover a posición central (1)", "pose": [0, -25, -50, 0, -15, 0, 0.020]},
+   {"desc": "8. Regresar a posición central (1)", "pose": [0, -25, -50, 0, -15, 0, 0.000]},
+
+    # --- Segundo cubo ---
+   {"desc": "9. Segundo cubo", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   {"desc": "10. Acercarse al segundo cubo", "pose": [90, 0, -25, 0, 0, 0, 0.000]},
+   {"desc": "11. Cerrar la pinza sobre el segundo cubo", "pose": [90, -37, -25, 0, -27, 0, 0.000]},
+   {"desc": "12. Levantar el segundo cubo", "pose": [90, -37 , -25, 0, -27, 0, 0.020]},
+   {"desc": "13. Levantar el segundo cubo", "pose": [90, 0, -25, 0, -27, 0, 0.020]},
+
+   # --- Posición central (2) ---
+   {"desc": "14. Pre-acomodación de la posición central (2)", "pose": [0, 0, 0, 0, 0, 0, 0.020]},
+   {"desc": "15. Mover a posición central (2)", "pose": [0, -28, -46, 0, -13, 0, 0.020]},
+   {"desc": "16. Regresar a posición central (2)", "pose": [0, -28, -46, 0, -13, 0, 0.000]},
+
+    # --- Recoger Par ---
+   {"desc": "17. Recoger el primer par", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   {"desc": "18. Mover el primer par a posición de recogida", "pose": [10, -28, -44, 0, -21, 90, 0.000]},
+   {"desc": "19. Colocar el primer par en posición de recogida", "pose": [0, -28, -44, 0, -21, 90, 0.000]},
+   {"desc": "20. Levantar el primer par", "pose": [0, -28, -44, 0, -21, 90, 0.020]},
+
+    # --- Colocar Primer Par a Posición Final ---
+   {"desc": "21. Pre-acomodación de la posición final", "pose": [0, 0, 0, 0, 0, 0, 0.020]},
+   {"desc": "22. Mover a posición final", "pose": [0, -48, -3, 0, -37, 0, 0.020]},
+   {"desc": "23. Regresar a posición final", "pose": [0, -48, -3, 0, -37, 0, 0.000]},
+
+    # --- Tercer Cubo ---
+   {"desc": "24. Tercer cubo", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   {"desc": "25. Acercarse al tercer cubo", "pose": [-57, 0, -5, 0, -42, 0, 0.000]},
+   {"desc": "26. Cerrar la pinza sobre el tercer cubo", "pose": [-57, -47, -5, 0, -44, 28, 0.000]},
+   {"desc": "27. Levantar el tercer cubo", "pose": [-57, -47, -5, 0, -44, 28, 0.020]},
+   {"desc": "28. Mover el tercer cubo a posición final", "pose": [-57, 0, -5, 0, -42, 0, 0.020]},
+
+    #--- Posición central (1) ---
+   {"desc": "29. Pre-acomodación de la posición central (1)", "pose": [0, 0, 0, 0, 0, 0, 0.020]},
+   {"desc": "30. Mover a posición central (1)", "pose": [0, -25, -50, 0, -15, 0, 0.020]},
+   {"desc": "31. Regresar a posición central (1)", "pose": [0, -25, -50, 0, -15, 0, 0.000]},
+
+    # --- Cuarto Cubo ---
+   {"desc": "32. Cuarto cubo", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   {"desc": "33. Acercarse al cuarto cubo", "pose": [57, 0, -5, 0, -42, 0, 0.000]},
+   {"desc": "34. Cerrar la pinza sobre el cuarto cubo", "pose": [57, -47, -5, 0, -42, -28, 0.000]},
+   {"desc": "35. Levantar el cuarto cubo", "pose": [57, -47, -5, 0, -42, -28, 0.020]},
+   {"desc": "36. Mover el cuarto cubo a posición final", "pose": [57, 0, -5, 0, -42, 0, 0.020]},
+
+    #--- Posición central (2) ---
+   {"desc": "37. Pre-acomodación de la posición central (2)", "pose": [0, 0, 0, 0, 0, 0, 0.020]},
+   {"desc": "38. Mover a posición central (2)", "pose": [0, -28, -46, 0, -13, 0, 0.020]},
+   {"desc": "39. Regresar a posición central (2)", "pose": [0, -28, -46, 0, -13, 0, 0.000]},
+
+    # --- Recoger Segundo Par ---
+   {"desc": "40. Recoger segundo par", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   {"desc": "41. Mover a posición de recogida", "pose": [10, -28, -44, 0, -21, 90, 0.000]},
+   {"desc": "42. Colocar segundo par en posición de recogida", "pose": [0, -28, -44, 0, -21, 90, 0.000]},
+   {"desc": "43. Levantar el segundo par", "pose": [0, -28, -44, 0, -21, 90, 0.020]},
+
+    # --- Colocar Segundo Par a Posición Final ---
+   {"desc": "44. Pre-acomodación de la posición final", "pose": [0, 0, 0, 0, 0, 0, 0.020]},
+   {"desc": "45. Mover a posición final", "pose": [0, -47, 0, 0, -44, 0, 0.020]},
+   {"desc": "46. Regresar a posición final", "pose": [0, -47, 0, 0, -44, 0, 0.000]},
+
+    # --- Quinto cubo --
+   {"desc": "47. Quinto cubo", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   {"desc": "48. Acercarse al quinto cubo", "pose": [-80, 0, -24, 0, -28, 0, 0.000]},
+   {"desc": "49. Cerrar la pinza sobre el quinto cubo", "pose": [-80, -38, -24, 0, -28, 5, 0.000]},
+   {"desc": "50. Levantar el quinto cubo", "pose": [-80, -38, -24, 0, -28, 5, 0.020]},
+   {"desc": "51. Mover el quinto cubo a posición final", "pose": [-80, 0, -24, 0, -28, 0, 0.020]},
+
+    #--- Posición central (1) ---
+   {"desc": "52. Pre-acomodación de la posición central (1)", "pose": [0,0, 0, 0, 0, 0, 0.020]},
+   {"desc": "53. Mover a posición central (1)", "pose": [0, -25, -50, 0, -15, 0, 0.020]},
+   {"desc": "54. Regresar a posición central (1)", "pose": [0, -25, -50, 0, -15, 0, 0.000]},
+
+    # --- Sexto cubo --- 
+   {"desc": "55. Sexto cubo", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   {"desc": "56. Acercarse al sexto cubo", "pose": [80, 0, -24, 0, -28, 0, 0.000]},
+   {"desc": "57. Cerrar la pinza sobre el sexto cubo", "pose": [80, -38, -24, 0, -28, -5, 0.000]},
+   {"desc": "58. Levantar el sexto cubo", "pose": [80, -38, -24, 0, -28, -5, 0.020]},
+   {"desc": "59. Mover el sexto cubo a posición final", "pose": [80, 0, -24, 0, -28, 0, 0.020]},  
+
+    # --- Posición central (2) ---
+   {"desc": "60. Pre-acomodación de la posición central (2)", "pose": [0, 0, 0, 0, 0, 0, 0.020]},
+   {"desc": "61. Mover a posición central (2)", "pose": [0, -28, -46, 0, -13, 0, 0.020]},
+   {"desc": "62. Regresar a posición central (2)", "pose": [0, -28, -46, 0, -13, 0, 0.000]},
+    # --- Recoger tercer par ---
+   {"desc": "63. Recoger tercer par", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+   {"desc": "64. Mover a posición de recogida", "pose": [10, -28, -44, 0, -21, 90, 0.000]},
+   {"desc": "65. Cerrar la pinza sobre el tercer par", "pose": [0, -28, -44, 0, -21, 90, 0.000]},
+   {"desc": "66. Levantar el tercer par", "pose": [0, -28, -44, 0, -21, 90, 0.020]},   
+
+   # --- Colocar tercer par a posición final ---
+   {"desc": "67. Colocar tercer par a posición final", "pose": [0, 0, 0, 0, 0, 0, 0.020]}, 
+   {"desc": "68. Mover a posición de colocación", "pose": [0, -46, 3, 0, -51, 0, 0.020]},
+   {"desc": "69. Regresar a posición segura", "pose": [0, -46, 3, 0, -51, 0, 0.000]}, 
+
+   # --- Posición segura ---
+   {"desc": "70. Posición segura", "pose": [0, 0, 0, 0, 0, 0, 0.000]},
+]
+
+# --- 4. CREACIÓN DE LA INTERFAZ GRÁFICA DE USUARIO (Tkinter) ---
+root = tk.Tk()
+root.title("Panel de Control Unificado - Niryo Ned2 Real + MuJoCo")
+root.geometry("480x680") # Un poco más alto para acomodar el indicador de emergencia
+root.configure(bg='#222222')
+
+style = ttk.Style()
+style.configure("TLabel", foreground="white", background="#222222", font=("Arial", 11))
+
+title_lbl = ttk.Label(root, text="Niryo Ned2 - Trayectoria Real y Virtual", font=("Arial", 14, "bold"))
+title_lbl.pack(pady=15)
+
+status_lbl = ttk.Label(root, text="Estado: Esperando comando...", font=("Arial", 11, "italic"), foreground="#00FF00")
+status_lbl.pack(pady=5)
+
+# --- CAMBIO SEGURIDAD: Etiqueta visual para la parada de emergencia ---
+emergency_lbl = ttk.Label(root, text="[ Presiona 'L' en cualquier momento para PARADA DE EMERGENCIA ]", font=("Arial", 10, "bold"), foreground="#FF3333")
+emergency_lbl.pack(pady=2)
+
+sliders = []
+label_values = []
+
+# Variable de estado interno para almacenar el valor de apertura de la pinza (Inicia abierta)
+current_gripper_val = 0.000
+
+# --- CAMBIO SEGURIDAD: Variable bandera para detener los hilos lógicos ---
+parada_emergencia = False
+
+def send_to_txt(*args):
+    """Convertir posiciones de los deslizadores a radianes e INTERCAMBIAR J4 y J5 SOLO para MuJoCo (e invertir J5)"""
+    ui_rad_vals = []
+    for i in range(6):
+        deg = sliders[i].get()
+        label_values[i].config(text=f"{int(deg)}°")
+        ui_rad_vals.append(np.radians(deg))
+    
+    # Inversión del J5 físico para la malla 4 de MuJoCo
+    j5_inverted = -ui_rad_vals[4]
+    
+    mujoco_joints_rad = [
+        ui_rad_vals[0],
+        ui_rad_vals[1],
+        ui_rad_vals[2],
+        ui_rad_vals[3], 
+        ui_rad_vals[4],  
+        ui_rad_vals[5]
+    ]
+    
+    # Inyectar la posición actual de la pinza para el simulador
+    mujoco_joints_rad.append(current_gripper_val)
+    
+    line = ",".join([f"{x:.6f}" for x in mujoco_joints_rad])
+    try:
+        with open(FILENAME, "w") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+# Crear deslizadores para las 6 articulaciones
+joint_names = ["Articulación 1", "Articulación 2", "Articulación 3", "Articulación 4", "Articulación 5", "Articulación 6"]
+for i in range(6):
+    frame = tk.Frame(root, bg='#222222', pady=5)
+    frame.pack(fill='x', padx=20)
+    
+    lbl = ttk.Label(frame, text=joint_names[i], width=15)
+    lbl.pack(side='left')
+    
+    slider = tk.Scale(frame, from_=JOINT_RANGES[i][0], to=JOINT_RANGES[i][1], orient='horizontal', 
+                      bg='#333333', fg='white', highlightbackground='#222222',
+                      troughcolor='#555555', command=send_to_txt, resolution=0.1)
+    
+    slider.set(initial_pose_deg[i])  
+    slider.pack(side='left', fill='x', expand=True, padx=10)
+    sliders.append(slider)
+    
+    val_lbl = ttk.Label(frame, text=f"{initial_pose_deg[i]}°", width=6)
+    val_lbl.pack(side='right')
+    label_values.append(val_lbl)
+
+# --- 5. PANEL DE CONTROL DIRECTO DE LA PINZA ---
+frame_g_ctrl = tk.Frame(root, bg='#222222', pady=10)
+frame_g_ctrl.pack(fill='x', padx=20)
+
+lbl_g_title = ttk.Label(frame_g_ctrl, text="Control de Pinza:", width=15)
+lbl_g_title.pack(side='left')
+
+def manual_close_gripper():
+    global current_gripper_val
+    # --- CAMBIO SEGURIDAD: Bloquear acción si se activó la emergencia ---
+    if parada_emergencia: return
+    
+    if robot_connected:
+        try:
+            robot.grasp_with_tool()
+            print("Pinza Real: ¡Cerrada!")
+        except Exception as e:
+            print(f"Error al cerrar la pinza real: {e}")
+            
+    current_gripper_val = 0.020
+    val_lbl_g.config(text="Cerrada")
+    send_to_txt()
+
+def manual_open_gripper():
+    global current_gripper_val
+    # --- CAMBIO SEGURIDAD: Bloquear acción si se activó la emergencia ---
+    if parada_emergencia: return
+    
+    if robot_connected:
+        try:
+            robot.release_with_tool()
+            print("Pinza Real: ¡Abierta!")
+        except Exception as e:
+            print(f"Error al abrir la pinza real: {e}")
+            
+    current_gripper_val = 0.000
+    val_lbl_g.config(text="Abierta")
+    send_to_txt()
+
+btn_close_g = tk.Button(frame_g_ctrl, text="Cerrar Pinza", width=12, highlightbackground='#222222', command=manual_close_gripper)
+btn_close_g.pack(side='left', padx=5, expand=True, fill='x')
+
+btn_open_g = tk.Button(frame_g_ctrl, text="Abrir Pinza", width=12, highlightbackground='#222222', command=manual_open_gripper)
+btn_open_g.pack(side='left', padx=5, expand=True, fill='x')
+
+val_lbl_g = ttk.Label(frame_g_ctrl, text="Abierta", width=15, anchor="center")
+val_lbl_g.pack(side='right', padx=5)
+
+
+# --- 6. MOTOR DE INTERPOLACIÓN DE MOVIMIENTO SUAVE ---
+paso_secuencia_actual = 0
+sub_paso_actual = 0
+
+# Cambia este valor (antes era 60). 
+# 30 lo hará el doble de rápido. 15 lo hará el cuádruple de rápido.
+total_sub_pasos = 10  
+
+pose_inicial_tramo = []
+
+def interpolar_movimiento():
+    global sub_paso_actual, paso_secuencia_actual, pose_inicial_tramo, current_gripper_val
+    
+    # --- CAMBIO SEGURIDAD: Si se presionó L, se aborta la función inmediatamente y no se reagenda con 'after' ---
+    if parada_emergencia:
+        return
+
+    if paso_secuencia_actual >= len(SECUENCIA):
+        status_lbl.config(text="Estado: ¡Rutina Pick & Place Completada Exitosamente!", foreground="#00FF00")
+        btn_start.config(state="normal")
+        btn_close_g.config(state="normal")
+        btn_open_g.config(state="normal")
+        btn_move_manual.config(state="normal")
+        return
+
+    pose_objetivo = SECUENCIA[paso_secuencia_actual]["pose"]
+    
+    if sub_paso_actual == 0:
+        pose_inicial_tramo = [sliders[i].get() for i in range(6)] + [current_gripper_val]
+        status_lbl.config(text=f"Ejecutando: {SECUENCIA[paso_secuencia_actual]['desc']}", foreground="#FFCC00")
+
+    t = sub_paso_actual / total_sub_pasos
+    
+    # Actualización progresiva en los deslizadores y archivo txt para refrescar MuJoCo suavemente
+    for i in range(6):
+        val_interpolado = pose_inicial_tramo[i] + (pose_objetivo[i] - pose_inicial_tramo[i]) * t
+        sliders[i].set(val_interpolado)
+        
+    current_gripper_val = pose_inicial_tramo[6] + (pose_objetivo[6] - pose_inicial_tramo[6]) * t
+    
+    if current_gripper_val >= 0.015:
+        val_lbl_g.config(text="Cerrada")
+    else:
+        val_lbl_g.config(text="Abierta")
+        
+    send_to_txt()
+    sub_paso_actual += 1
+    
+    if sub_paso_actual <= total_sub_pasos:
+        root.after(20, interpolar_movimiento)
+    else:
+        # --- LA TRANSICIÓN VISUAL SUAVE LLEGÓ A SU DESTINO -> EJECUTAR EN EL ROBOT REAL ---
+        if robot_connected:
+            try:
+                # El robot real recibe los ángulos de las articulaciones en su orden nativo directo
+                joints_real_rad = [np.radians(pose_objetivo[i]) for i in range(6)]
+                robot.move_joints(joints_real_rad)
+
+                # ---------------------------------------------------------
+                # --- NUEVO: REGISTRO DE COORDENADAS CARTESIANAS (X, Y, Z) ---
+                # Leemos la posición real actual del robot
+                pose_cartesiana = robot.get_pose()
+                
+                # Convertimos de metros a milímetros
+                x_mm = pose_cartesiana.x * 1000
+                y_mm = pose_cartesiana.y * 1000
+                z_mm = pose_cartesiana.z * 1000
+                
+                # Preparamos el texto a guardar
+                desc_paso = SECUENCIA[paso_secuencia_actual]['desc']
+                registro = f"Paso {paso_secuencia_actual} [{desc_paso}] -> X: {x_mm:.2f} mm | Y: {y_mm:.2f} mm | Z: {z_mm:.2f} mm"
+                
+                # Mostramos en consola y guardamos en el archivo .txt
+                print(registro)
+                with open("registro_coordenadas.txt", "a") as f:
+                    f.write(registro + "\n")
+                # ---------------------------------------------------------
+                
+                # Control de la herramienta física coincidiendo con el paso actual de la secuencia
+                if pose_objetivo[6] >= 0.015:
+                    robot.grasp_with_tool()
+                else:
+                    robot.release_with_tool()
+            except Exception as e:
+                print(f"Error de ejecución de hardware en el segmento {paso_secuencia_actual}: {e}")
+                
+        sub_paso_actual = 0
+        paso_secuencia_actual += 1
+        # 500ms de descanso estático para absorber la inercia física antes del siguiente comando
+        root.after(250, interpolar_movimiento)
+
+def comenzar_rutina():
+    global paso_secuencia_actual, sub_paso_actual, parada_emergencia
+    
+    # --- NUEVO: Crear o limpiar el archivo de registro al iniciar ---
+    try:
+        with open("registro_coordenadas.txt", "w") as f:
+            f.write("--- REGISTRO DE COORDENADAS CARTESIANAS (mm) ---\n")
+    except Exception as e:
+        print(f"No se pudo crear el archivo de registro: {e}")
+
+    # --- CAMBIO SEGURIDAD: Reiniciamos el estado de emergencia al volver a arrancar ---
+    parada_emergencia = False
+    emergency_lbl.config(text="[ Presiona 'L' en cualquier momento para PARADA DE EMERGENCIA ]", foreground="#FF3333")
+    
+    btn_start.config(state="disabled")
+    btn_close_g.config(state="disabled")
+    btn_open_g.config(state="disabled")
+    btn_move_manual.config(state="disabled")
+    
+    sub_paso_actual = 0
+    paso_secuencia_actual += 1
+    # 100ms de descanso estático para absorber la inercia física antes del siguiente comando
+    root.after(100, interpolar_movimiento)
+
+# --- 7. BOTONES DE ACCIÓN COMPLEMENTARIOS ---
+frame_buttons = tk.Frame(root, bg='#222222', pady=10)
+frame_buttons.pack()
+
+def move_robot_manual():
+    """Toma la configuración actual de los deslizadores de la UI y comanda el brazo real de forma nativa"""
+    if parada_emergencia: return # --- CAMBIO SEGURIDAD ---
+    
+    if robot_connected:
+        try:
+            joints_rad = [np.radians(slider.get()) for slider in sliders]
+            robot.move_joints(joints_rad)
+            print("Hardware: Brazo movido manualmente a la configuración de la pose de la UI.")
+        except Exception as e:
+            print(f"Error en la transmisión del comando manual de articulaciones: {e}")
+    send_to_txt()
+
+btn_move_manual = tk.Button(frame_buttons, text="Enviar Deslizadores al Brazo Real", width=30, highlightbackground='#222222', command=move_robot_manual)
+btn_move_manual.pack(pady=4)
+
+btn_start = tk.Button(frame_buttons, text="▶️ INICIAR RUTINA SUAVE", font=("Arial", 11, "bold"),
+                      bg="#00AA55", fg="white", activebackground="#008844", activeforeground="white",
+                      bd=0, padx=10, pady=8, command=comenzar_rutina)
+btn_start.pack(pady=10)
+
+
+# --- 8. CAMBIO SEGURIDAD: FUNCIÓN DE EMERGENCIA Y BINDING ---
+def activar_parada_emergencia(event=None):
+    """ Detiene inmediatamente cualquier bucle lógico y manda comando de stop al Niryo """
+    global parada_emergencia
+    parada_emergencia = True
+    
+    print("!!! PARADA DE EMERGENCIA ACTIVADA POR TECLADO !!!")
+    
+    # 1. Modificar interfaz gráfica para alertar al usuario
+    status_lbl.config(text="ESTADO: !!! PARADA DE EMERGENCIA !!!", foreground="#FF0000")
+    emergency_lbl.config(text="[ EMERGENCIA ACTIVA - Reinicia la rutina para desbloquear ]", foreground="#FFAA00")
+    
+    # Re-habilitar botones para poder recuperar el control o reiniciar
+    btn_start.config(state="normal")
+    btn_close_g.config(state="normal")
+    btn_open_g.config(state="normal")
+    btn_move_manual.config(state="normal")
+    
+    # 2. Enviar orden física inmediata al Niryo de detenerse si está conectado
+    if robot_connected:
+        try:
+            robot.stop_move()  # Detiene cualquier desplazamiento del hardware de Niryo
+            print("Hardware: Enviado comando 'stop_move()' exitosamente.")
+        except Exception as e:
+            print(f"No se pudo enviar 'stop_move' al brazo real: {e}")
+
+# Escuchar la tecla 'L' (tanto en minúscula como mayúscula) en toda la ventana de Tkinter
+root.bind("<Key-l>", activar_parada_emergencia)
+root.bind("<Key-L>", activar_parada_emergencia)
+
+
+# --- 9. GESTIÓN DE APAGADO SEGURO ---
+def on_close():
+    if robot_connected:
+        robot.close_connection()
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_close)
+
+# Forzar escritura de inicialización
+send_to_txt()
+
+root.mainloop()
